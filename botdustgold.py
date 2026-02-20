@@ -5,7 +5,7 @@ from datetime import datetime, timezone, timedelta
 import requests
 import pandas as pd
 import numpy as np
-import yfinance as yf # type: ignore
+import yfinance as yf  # type: ignore
 import pytz
 
 # ============================================================
@@ -32,9 +32,21 @@ TZ_PARIS = pytz.timezone("Europe/Paris")
 last_news_date = None
 last_trade_alert = 0
 
+# ============================================================
+# CONFIG QUANTITATIVE
+# ============================================================
+
+quant_config = {
+    "atr_period": 14,
+    "atr_high_vol": 1.2,
+    "atr_low_vol": 0.5,
+    "breakout_volume_mult": 1.5,
+    "zscore_window": 50,
+    "ema_slope_window": 5,
+}
 
 # ============================================================
-# HORAIRES DE FONCTIONNEMENT (OPTION C)
+# HORAIRES DE FONCTIONNEMENT
 # ============================================================
 
 def is_trading_time():
@@ -50,7 +62,6 @@ def is_trading_time():
         return False
 
     return True
-
 
 # ============================================================
 # OUTILS TELEGRAM
@@ -74,20 +85,17 @@ def send_telegram(text: str):
     except Exception as e:
         print("Erreur Telegram:", e)
 
-
 # ============================================================
-# FETCH YAHOO FINANCE (PATCH 1D)
+# FETCH YAHOO FINANCE
 # ============================================================
 
 def fetch_intraday(symbol: str, interval: str = YF_INTERVAL, lookback: int = 300):
     try:
-        # Choose period based on interval
         if interval.endswith("m"):
             period = "5d"
         else:
             period = "1mo"
 
-        # Download data
         df = yf.download(
             tickers=symbol,
             period=period,
@@ -100,7 +108,6 @@ def fetch_intraday(symbol: str, interval: str = YF_INTERVAL, lookback: int = 300
             print(f"⚠️ No Yahoo Finance data for {symbol}.")
             return None
 
-        # Standardize column names
         df = df.rename(columns={
             "Open": "open",
             "High": "high",
@@ -111,7 +118,6 @@ def fetch_intraday(symbol: str, interval: str = YF_INTERVAL, lookback: int = 300
 
         df = df.reset_index()
 
-        # Normalize datetime column
         if "Datetime" in df.columns:
             df["datetime"] = pd.to_datetime(df["Datetime"])
         elif "Date" in df.columns:
@@ -122,13 +128,11 @@ def fetch_intraday(symbol: str, interval: str = YF_INTERVAL, lookback: int = 300
         df = df[["datetime", "open", "high", "low", "close", "volume"]]
         df = df.sort_values("datetime").reset_index(drop=True)
 
-        # PATCH : force OHLCV columns to 1D
         for col in ["open", "high", "low", "close", "volume"]:
             df[col] = df[col].apply(
                 lambda x: x[0] if isinstance(x, (list, np.ndarray)) else x
             )
 
-        # Limit to lookback
         if len(df) > lookback:
             df = df.iloc[-lookback:]
 
@@ -137,7 +141,6 @@ def fetch_intraday(symbol: str, interval: str = YF_INTERVAL, lookback: int = 300
     except Exception as e:
         print(f"Yahoo Finance error for {symbol} :", e)
         return None
-
 
 # ============================================================
 # INDICATEURS TECHNIQUES
@@ -195,6 +198,42 @@ def vwap(df):
     pv = close * volume
     return pv.cumsum() / (volume.cumsum() + 1e-9)
 
+# ============================================================
+# OUTILS QUANTITATIFS
+# ============================================================
+
+def atr(high, low, close, period=14):
+    high = pd.Series(high).astype(float)
+    low = pd.Series(low).astype(float)
+    close = pd.Series(close).astype(float)
+
+    prev_close = close.shift(1)
+
+    tr = pd.concat([
+        (high - low),
+        (high - prev_close).abs(),
+        (low - prev_close).abs()
+    ], axis=1).max(axis=1)
+
+    return tr.rolling(period).mean()
+
+def zscore(series, window=50):
+    series = pd.Series(series).astype(float)
+    mean = series.rolling(window).mean()
+    std = series.rolling(window).std()
+    return (series - mean) / (std + 1e-9)
+
+def ema_slope(series, period=50, window=5):
+    ema_line = ema(series, period)
+    if len(ema_line) < window + 1:
+        return 0
+    return float((ema_line.iloc[-1] - ema_line.iloc[-window]) /
+                 (ema_line.iloc[-window] + 1e-9) * 100)
+
+def volume_ratio(volume, window=20):
+    volume = pd.Series(volume).astype(float)
+    avg = volume.rolling(window).mean()
+    return float(volume.iloc[-1] / (avg.iloc[-1] + 1e-9))
 
 # ============================================================
 # OUTILS LECTURE INSTITUTIONNELLE
@@ -214,7 +253,6 @@ def detect_market_structure(close, lookback=20):
 
     return "Structure mixte."
 
-
 def detect_liquidity_sweep(high, low, lookback=10):
     high = pd.Series(high).astype(float)
     low = pd.Series(low).astype(float)
@@ -232,7 +270,6 @@ def detect_liquidity_sweep(high, low, lookback=10):
         notes.append("Balayage de liquidité basse.")
     return notes
 
-
 def detect_premium_discount(last_close, ref_ema, tol=0.002):
     if ref_ema <= 0:
         return None
@@ -242,7 +279,6 @@ def detect_premium_discount(last_close, ref_ema, tol=0.002):
     if ratio < 1 - tol:
         return "Zone discount institutionnelle."
     return "Zone d'équilibre."
-
 
 def detect_fvg(high, low):
     high = pd.Series(high).astype(float)
@@ -261,16 +297,14 @@ def detect_fvg(high, low):
         notes.append("FVG baissier.")
     return notes
 
-
 # ============================================================
-# OUTILS SUPPORT / RÉSISTANCE + RANGE
+# SUPPORT / RÉSISTANCE + RANGE
 # ============================================================
 
 def find_support_resistance(close, lookback=50):
     close = pd.Series(close).astype(float)
     recent = close.tail(lookback)
 
-    # Sécurité : si pas assez de données
     if len(recent) < 5:
         return float(recent.min()), float(recent.max())
 
@@ -288,25 +322,113 @@ def find_support_resistance(close, lookback=50):
 
     return round(support, 2), round(resistance, 2)
 
-
 def detect_range(close, support, resistance):
     close = pd.Series(close).astype(float)
     last = close.iloc[-1]
     return support < last < resistance
 
+# ============================================================
+# ANALYSE QUANTITATIVE (OR / DUST)
+# ============================================================
+
+def quant_analysis(close, high, low, volume, config=quant_config):
+    close = pd.Series(close).astype(float)
+    high = pd.Series(high).astype(float)
+    low = pd.Series(low).astype(float)
+    volume = pd.Series(volume).astype(float)
+
+    last_close = float(close.iloc[-1])
+
+    atr_raw = atr(high, low, close, config["atr_period"])
+    atr_pct = float((atr_raw.iloc[-1] / last_close) * 100)
+
+    z = zscore(close, config["zscore_window"])
+    last_z = float(z.iloc[-1])
+
+    slope = ema_slope(close, period=50, window=config["ema_slope_window"])
+
+    vol_ratio = volume_ratio(volume, window=20)
+
+    breakout = vol_ratio > config["breakout_volume_mult"]
+
+    macd_line, signal_line, hist = macd(close, 8, 21, 5)
+    momentum = "positif" if hist.iloc[-1] > 0 and slope > 0 else "négatif"
+
+    if slope > 0.1 and atr_pct < 1.0:
+        regime = "trend"
+    elif atr_pct < config["atr_low_vol"]:
+        regime = "range"
+    elif atr_pct > config["atr_high_vol"]:
+        regime = "high_vol"
+    else:
+        regime = "neutre"
+
+    return {
+        "atr_pct": round(atr_pct, 2),
+        "zscore": round(last_z, 2),
+        "slope": round(slope, 3),
+        "vol_ratio": round(vol_ratio, 2),
+        "breakout": breakout,
+        "momentum": momentum,
+        "regime": regime
+    }
+
+# ============================================================
+# TRADUCTION INSTITUTIONNELLE
+# ============================================================
+
+def quant_to_text(q, trend):
+    parts = []
+
+    if trend == "haussière":
+        if q["momentum"] == "positif":
+            parts.append(
+                "Selon les données quantitatives, le mouvement reste solide : momentum positif, volume supérieur à la moyenne et volatilité maîtrisée renforcent le biais haussier."
+            )
+        else:
+            parts.append(
+                "Les données quantitatives montrent un marché haussier mais fragile, avec un momentum hésitant malgré une volatilité contenue."
+            )
+
+    elif trend == "baissière":
+        if q["momentum"] == "négatif":
+            parts.append(
+                "Les données quantitatives confirment une pression vendeuse : momentum négatif, volatilité en hausse et absence de signaux de retournement court terme."
+            )
+        else:
+            parts.append(
+                "Le marché reste baissier mais montre des signes d'essoufflement, avec un momentum moins agressif que précédemment."
+            )
+
+    else:
+        if q["regime"] == "range":
+            parts.append(
+                "Les données quantitatives indiquent une phase de range, avec une volatilité faible et un manque de direction claire."
+            )
+        elif q["regime"] == "high_vol":
+            parts.append(
+                "Les données quantitatives révèlent une volatilité élevée, signe d'un marché instable et difficile à lire."
+            )
+        else:
+            parts.append(
+                "Les données quantitatives montrent un marché neutre, sans conviction directionnelle forte."
+            )
+
+    if q["breakout"]:
+        parts.append("Un potentiel breakout est détecté grâce à un volume supérieur à la moyenne.")
+
+    return " ".join(parts)
 
 # ============================================================
 # ANALYSE OR (GC=F)
 # ============================================================
 
 def analyze_gold(df):
-    # Sécurisation des colonnes (évite les erreurs 2D)
     close = df["close"].squeeze().astype(float)
     high = df["high"].squeeze().astype(float)
     low = df["low"].squeeze().astype(float)
     volume = df["volume"].squeeze().astype(float)
 
-    # Indicateurs
     ema20 = ema(close, 20)
     ema50 = ema(close, 50)
     ema200 = ema(close, 200)
@@ -317,7 +439,6 @@ def analyze_gold(df):
     stoch_k, stoch_d = stochastic(high, low, close, 5, 3, 3)
     vwap_j = vwap(df)
 
-    # Extraction sécurisée des dernières valeurs
     last_close = float(close.iloc[-1])
     last_ema200 = float(ema200.iloc[-1])
     last_rsi9 = float(rsi9.iloc[-1])
@@ -326,7 +447,6 @@ def analyze_gold(df):
     avg_vol = float(volume.rolling(20).mean().iloc[-1])
     last_vwap = float(vwap_j.iloc[-1])
     last_bb_mid = float(bb_mid.iloc[-1])
-
 
     if last_close > last_ema200:
         trend = "haussière"
@@ -368,6 +488,8 @@ def analyze_gold(df):
     if fvg:
         inst_notes.extend(fvg)
 
+    q = quant_analysis(close, high, low, volume)
+
     signal = "NEUTRE"
     bias_text = ""
     entry_price = round(last_close, 2)
@@ -395,6 +517,8 @@ def analyze_gold(df):
             f"Cassure baissière < {support}"
         )
 
+    bias_text += "\n" + quant_to_text(q, trend)
+
     return {
         "asset": "OR (GC=F)",
         "signal": signal,
@@ -405,9 +529,9 @@ def analyze_gold(df):
         "inst_notes": inst_notes,
         "last_price": round(last_close, 2),
         "support": support,
-        "resistance": resistance
+        "resistance": resistance,
+        "quant": q
     }
-
 
 # ============================================================
 # ANALYSE DUST
@@ -428,12 +552,12 @@ def analyze_dust(df):
     bb_mid, bb_up, bb_low = bollinger(close, 20, 1.5)
     stoch_k, stoch_d = stochastic(high, low, close, 5, 3, 3)
 
-    last_close = close.iloc[-1]
-    last_ema100 = ema100.iloc[-1]
-    last_rsi7 = rsi7.iloc[-1]
-    last_hist = hist.iloc[-1]
-    last_vol = volume.iloc[-1]
-    avg_vol = volume.rolling(20).mean().iloc[-1]
+    last_close = float(close.iloc[-1])
+    last_ema100 = float(ema100.iloc[-1])
+    last_rsi7 = float(rsi7.iloc[-1])
+    last_hist = float(hist.iloc[-1])
+    last_vol = float(volume.iloc[-1])
+    avg_vol = float(volume.rolling(20).mean().iloc[-1])
 
     if last_close > last_ema100:
         trend = "haussière"
@@ -469,6 +593,8 @@ def analyze_dust(df):
     if fvg:
         inst_notes.extend(fvg)
 
+    q = quant_analysis(close, high, low, volume)
+
     signal = "NEUTRE"
     bias_text = ""
     entry_price = round(last_close, 2)
@@ -480,7 +606,7 @@ def analyze_dust(df):
             entry_price = round(last_close * 0.997, 2)
 
     elif trend == "baissière":
-        bias_text = "Tendance baissière → ventes."
+        bias_text = "Tendance baissière → ventes privilégiées."
         if last_rsi7 < 45 and last_close < ema9.iloc[-1] and last_hist < 0:
             signal = "VENTE"
             entry_price = round(last_close * 1.003, 2)
@@ -496,6 +622,8 @@ def analyze_dust(df):
             f"Cassure baissière < {support}"
         )
 
+    bias_text += "\n" + quant_to_text(q, trend)
+
     return {
         "asset": "DUST",
         "signal": signal,
@@ -506,9 +634,9 @@ def analyze_dust(df):
         "inst_notes": inst_notes,
         "last_price": round(last_close, 2),
         "support": support,
-        "resistance": resistance
+        "resistance": resistance,
+        "quant": q
     }
-
 
 # ============================================================
 # MESSAGE TRADING
@@ -533,7 +661,6 @@ def build_trading_message(gold, dust):
 
     parts.append("\n")
 
-    # DUST
     parts.append(
         f"🟢 <b>DUST</b>\n"
         f"Signal : <b>{dust['signal']}</b>\n"
@@ -547,7 +674,6 @@ def build_trading_message(gold, dust):
     if dust["psycho_notes"]:
         parts.append("🔥 <b>Psycho DUST :</b>\n" + "\n".join(f"• {n}" for n in dust["psycho_notes"]))
 
-    # Institutionnel
     inst = []
     inst.append("• <b>OR :</b>")
     inst.extend(f"  - {n}" for n in gold["inst_notes"])
@@ -557,7 +683,6 @@ def build_trading_message(gold, dust):
     parts.append("\n📐 <b>Lecture institutionnelle :</b>\n" + "\n".join(inst))
 
     return header + "\n".join(parts)
-
 
 # ============================================================
 # NEWS — UNE SEULE FOIS PAR JOUR À 22H
@@ -599,7 +724,6 @@ def fetch_daily_news():
         print("Erreur fetch_daily_news:", e)
         return None
 
-
 def check_news_alert():
     global last_news_date
 
@@ -612,7 +736,6 @@ def check_news_alert():
             send_telegram(news)
         last_news_date = now.date()
 
-
 # ============================================================
 # BOUCLE PRINCIPALE
 # ============================================================
@@ -620,7 +743,7 @@ def check_news_alert():
 def main_loop():
     global last_trade_alert
 
-    send_telegram("🚀 Bot OR / DUST démarré (Yahoo Finance).")
+    send_telegram("🚀 Bot OR / DUST démarré (Yahoo Finance + Analyse Quantitative).")
 
     while True:
         now = datetime.now(TZ_PARIS)
@@ -638,16 +761,19 @@ def main_loop():
             dust_df = fetch_intraday(DUST_SYMBOL)
 
             if gold_df is not None and dust_df is not None:
-                gold_sig = analyze_gold(gold_df)
-                dust_sig = analyze_dust(dust_df)
+                try:
+                    gold_sig = analyze_gold(gold_df)
+                    dust_sig = analyze_dust(dust_df)
 
-                msg = build_trading_message(gold_sig, dust_sig)
-                send_telegram(msg)
+                    msg = build_trading_message(gold_sig, dust_sig)
+                    send_telegram(msg)
+
+                except Exception as e:
+                    print("Erreur analyse :", e)
 
         check_news_alert()
 
         time.sleep(10)
-
 
 # ============================================================
 # LANCEMENT
